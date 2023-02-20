@@ -1,9 +1,20 @@
+use std::error::Error;
+
+use  byteorder::BigEndian;
+#[cfg(feature = "tokio")] 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use serde::{Serialize, Deserialize};
 
 const DF01_OPEN_SCOPE: &[u8; 2] = b"#!";
 const DF01_CLOSE_SCOPE: &[u8; 4] = b"!#\r\n";
+
+const DF02_OPEN_SCOPE: &[u8; 2] = b"#~";
+// const DF02_CLOSE_SCOPE: &[u8; 4] = b"~#\r\n";
+
 const DF01_METADATA_ENDING: &[u8; 2] = b"\r\n";
+
+
 
 #[derive(Debug)]
 pub enum MetaType {
@@ -12,27 +23,87 @@ pub enum MetaType {
     Qdatastream = 0x00010007,
 }
 
+#[derive(Debug)]
+pub enum DFParseError {
+    NotADFMessage(String),
+    MalformedHeader(String),
+    Unimplemented(String),
+    MetaError(Box<dyn Error + std::marker::Send>),
+    IoError(std::io::Error)
+}
+
+impl std::fmt::Display for DFParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotADFMessage(desc) => f.write_str(desc),
+            Self::MalformedHeader(desc) => f.write_str(desc),
+            Self::Unimplemented(desc) => f.write_str(desc),
+            Self::MetaError(err) => err.fmt(f),
+            Self::IoError(err) => err.fmt(f)
+        }
+    }
+}
+
+impl Error for DFParseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::NotADFMessage(_) => None, 
+            Self::MalformedHeader(_) => None,
+            Self::Unimplemented(_) => None,
+            Self::MetaError(err) => err.source(),
+            Self::IoError(err) => err.source()
+        }
+    }
+}
+
+impl From<std::io::Error> for DFParseError {
+    fn from(err: std::io::Error) -> Self {
+        DFParseError::IoError(err)
+    }
+}
+
+impl From<serde_json::Error> for DFParseError {
+    fn from(err: serde_json::Error) -> Self {
+        DFParseError::MetaError(Box::new(err))
+    }
+}
+
 impl TryFrom<u32> for MetaType {
-    type Error = ();
+    type Error = DFParseError;
     fn try_from(v: u32) -> Result<Self, Self::Error> {
         match v {
             code if code == MetaType::Undefined as u32 => Ok(MetaType::Undefined),
             code if code == MetaType::Json as u32 => Ok(MetaType::Json),
             code if code == MetaType::Qdatastream as u32 => Ok(MetaType::Qdatastream),
-            code => panic!("No meta type for 0x{:x} code!", code),
+            code => Err(DFParseError::MalformedHeader(
+                format!("No meta type for 0x{code:x} code!")
+            )), // TODO: remove panic
         }
     }
 }
 
 #[derive(Debug)]
 pub enum DFBinaryHeader {
-    DFText,
     DF01 {
         time: u32,
         meta_type: MetaType,
         meta_len: usize,
         data_type: u32,
         data_len: usize
+    },
+}
+
+impl DFBinaryHeader {
+    fn get_meta_len(&self) -> usize {
+        match self {
+            Self::DF01 { meta_len, .. } => *meta_len
+        }
+    }
+
+    fn get_data_len(&self) -> usize {
+        match self {
+            Self::DF01 { data_len, .. } => *data_len
+        }
     }
 }
 
@@ -42,33 +113,47 @@ pub struct DFMessage<T: for<'a> Deserialize<'a>> {
     pub data: Option<Vec<u8>>
 }
 
-pub async fn read_binary_header(stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> tokio::io::Result<DFBinaryHeader> {
+fn header_size(scope: &[u8; 2]) -> Result<usize, DFParseError> {
+    if scope == DF01_OPEN_SCOPE {
+        Ok(30)
+    } else if scope == DF02_OPEN_SCOPE {
+        Ok(24) // TODO: check
+    } else {
+        Err(DFParseError::NotADFMessage(
+            format!("unsupported opening scope {}", String::from_utf8_lossy(scope))
+        ))
+    }
+}
 
-    let header_open_scope = {
-        let mut header_open_scope = [0, 0];
-        stream.read_exact(&mut header_open_scope).await?;
-        header_open_scope
-    };
+fn parse_header(header_bytes: &[u8; 30]) -> Result<DFBinaryHeader, DFParseError> {
     
-    if header_open_scope == *DF01_OPEN_SCOPE {
+    if &header_bytes[0..2] == DF01_OPEN_SCOPE {
         
-        let header_type = stream.read_u32().await?;
-        assert!(header_type == 0x14000);
+        let header_type = u32::from_be_bytes(header_bytes[2..6].try_into().unwrap());
+        if header_type != 0x14000 {
+            Err(DFParseError::MalformedHeader("header_type != 0x14000".to_string()))?
+        }
 
-        let time = stream.read_u32().await?;
+        let time = u32::from_be_bytes(header_bytes[6..10].try_into().unwrap());
 
-        let meta_type = MetaType::try_from(stream.read_u32().await?).unwrap(); // TODO: propagate unwrap
-        let meta_len = stream.read_u32().await? as usize;
+        let meta_type = MetaType::try_from(
+            u32::from_be_bytes(header_bytes[10..14].try_into().unwrap())
+        )?;
+        let meta_len = u32::from_be_bytes(header_bytes[14..18].try_into().unwrap()) as usize;
 
-        let data_type = stream.read_u32().await?;
-        let data_len = stream.read_u32().await? as usize;
+        let data_type = u32::from_be_bytes(header_bytes[18..22].try_into().unwrap());
+        let data_len = u32::from_be_bytes(header_bytes[22..26].try_into().unwrap()) as  usize;
 
-        let header_close_scope = {
-            let mut header_close_scope = [0, 0, 0, 0];
-            stream.read_exact(&mut header_close_scope).await?;
-            header_close_scope
-        };
-        assert!(header_close_scope == *DF01_CLOSE_SCOPE);
+        if &header_bytes[26..30] != DF01_CLOSE_SCOPE {
+            println!("{:?}", &header_bytes[26..30]);
+            Err(DFParseError::MalformedHeader(
+                format!(
+                    "open scope '{}' does not match closing '{}'",
+                    String::from_utf8_lossy(&header_bytes[0..2]),
+                    String::from_utf8_lossy(&header_bytes[26..30])
+                )
+            ))?
+        }
 
         Ok(DFBinaryHeader::DF01 { 
             time,
@@ -77,108 +162,174 @@ pub async fn read_binary_header(stream: & mut (impl AsyncReadExt + std::marker::
             data_type,
             data_len
          })
+    } else if &header_bytes[0..2] == DF02_OPEN_SCOPE {
+        Err(DFParseError::Unimplemented("DF02 format parsing is not implemented".to_string()))?
     } else {
-        // elif header_type == b"#~DF02":
-        //     header['type'] = header_type[2:6]
-        //     header['meta_type'] = stream.read(2)
-        //     header['meta_len'] = struct.unpack('>I', stream.read(4))[0]
-        //     header['data_len'] = struct.unpack('>I', stream.read(4))[0]
-        //     stream.read(4)
-        panic!("unsupported opening scope {:?}", header_open_scope)
+        Err(DFParseError::NotADFMessage(
+            format!("unsupported opening scope {}", String::from_utf8_lossy(&header_bytes[0..2]))
+        ))
     }
 }
 
-pub async fn write_df_message<T: Serialize>(
-    stream: & mut (impl AsyncWriteExt + std::marker::Unpin), 
-    meta: T, data: Option<Vec<u8>>) -> tokio::io::Result<()> {
-
-        let meta_vec =  {
-            let mut json = serde_json::to_vec_pretty(&meta).unwrap();
-            json.extend(DF01_METADATA_ENDING);
-            json
-        };
-        
-
-        let capacity = {
-            let capacity = 30 + meta_vec.len();
-            if let Some(data) = &data {
-                capacity + data.len()
-            } else {
-                capacity
-            }
-        };
-
-        let mut buffer = Vec::with_capacity(capacity);
-
-        assert!(buffer.write(DF01_OPEN_SCOPE).await? == 2);
-        buffer.write_u32(0x00014000).await?;
-        buffer.write_u32(std::time::SystemTime::now().duration_since(
-            std::time::UNIX_EPOCH).unwrap().as_secs() as u32).await?;
-        buffer.write_u32(MetaType::Json as u32).await?;
-        buffer.write_u32(meta_vec.len() as u32).await?;
-        buffer.write_u32(0x00000000).await?;
-        if let Some(bytes) = &data {
-            buffer.write_u32(bytes.len() as u32).await?;
+fn make_message<T: Serialize>(meta: T, data: &Option<Vec<u8>>) -> Result<Vec<u8>, DFParseError> {
+    
+    let meta_vec =  {
+        let mut json = serde_json::to_vec_pretty(&meta).unwrap();
+        json.extend(DF01_METADATA_ENDING);
+        json
+    };
+    
+    let capacity = {
+        let capacity = 30 + meta_vec.len();
+        if let Some(data) = &data {
+            capacity + data.len()
         } else {
-            buffer.write_u32(0).await?;
+            capacity
         }
-        assert!(buffer.write(DF01_CLOSE_SCOPE).await? == 4);
+    };
 
-        // TODO: make extend without copy (concat?)
-        buffer.extend(meta_vec);
+    let mut buffer = Vec::with_capacity(capacity);
+
+    std::io::Write::write_all(&mut buffer, DF01_OPEN_SCOPE)?;
+    byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, 0x00014000)?;
+    byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, std::time::SystemTime::now().duration_since(
+        std::time::UNIX_EPOCH).unwrap().as_secs() as u32)?;
+    byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, MetaType::Json as u32)?;
+    byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, meta_vec.len() as u32)?;
+    byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, 0x00000000)?;
+    if let Some(bytes) = &data {
+        byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, bytes.len() as u32)?;
+    } else {
+        byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, 0)?;
+    }
+    std::io::Write::write_all(&mut buffer, DF01_CLOSE_SCOPE)?;
+
+    Ok(buffer)
+}
+
+
+#[cfg(not(feature = "tokio"))]
+pub fn read_binary_header(stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<DFBinaryHeader, DFParseError> {
+
+    let mut header_bytes = [0u8; 30];
+
+    stream.read_exact(&mut header_bytes[0..2])?;
+    let header_size = header_size(&header_bytes[0..2].try_into().unwrap())?;
+
+    stream.read_exact(&mut header_bytes[2..header_size])?;
+
+    parse_header(&header_bytes)
+}
+
+#[cfg(feature = "tokio")] 
+pub async fn read_binary_header(stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> Result<DFBinaryHeader, DFParseError> {
+
+    let mut header_bytes = [0u8; 30];
+
+    stream.read_exact(&mut header_bytes[0..2]).await?;
+    let header_size = header_size(&header_bytes[0..2].try_into().unwrap())?;
+
+    stream.read_exact(&mut header_bytes[2..header_size]).await?;
+
+    parse_header(&header_bytes)
+}
+
+#[cfg(not(feature = "tokio"))]
+pub fn write_df_message<T: Serialize>(
+    stream: & mut (impl std::io::Write + std::marker::Unpin), 
+    meta: T, data: Option<Vec<u8>>) -> Result<(), DFParseError> {
+
+        stream.write_all(&make_message(meta, &data)?)?;
         if let Some(bytes) = data {
-            buffer.extend(bytes);
+            stream.write_all(&bytes)?;
         }
-
-        stream.write_all(&buffer[..]).await?;
-        stream.flush().await?;
-
         Ok(())
 }
 
-pub async fn read_df_header_and_meta<T: for<'a> Deserialize<'a>> (
-    stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> tokio::io::Result<(DFBinaryHeader, T)> {
+#[cfg(feature = "tokio")] 
+pub async fn write_df_message<T: Serialize>(
+    stream: & mut (impl AsyncWriteExt + std::marker::Unpin), 
+    meta: T, data: Option<Vec<u8>>) -> Result<(), DFParseError> {
 
-    let header = read_binary_header(stream).await?;
+        stream.write_all(&make_message(meta, &data)?).await?;
+        if let Some(bytes) = data {
+            stream.write_all(&bytes).await?;
+        }
+        Ok(())
+}
+
+pub fn parse_meta<T: for<'a> Deserialize<'a>> (
+    header: &DFBinaryHeader, meta_bytes: Vec<u8>) -> Result<T, DFParseError> {
     
     let meta = match &header {
-        DFBinaryHeader::DF01 {  meta_type, meta_len, .. } => {
-            let meta_bytes = {
-                let mut meta_bytes = vec![0u8; meta_len.to_owned() as usize];
-                stream.read_exact(&mut meta_bytes[..]).await?;
-                meta_bytes
-            };
-
+        DFBinaryHeader::DF01 {  meta_type, .. } => {
             match meta_type {
                 MetaType::Json => {
                     serde_json::from_slice(&meta_bytes)?
                 },
-                meta_type => panic!("MetaType::{meta_type:?} handling is not implemented")
+                meta_type => {
+                    Err(DFParseError::Unimplemented(format!("MetaType::{meta_type:?} handling is not implemented")))?
+                }
             }
         },
-        DFBinaryHeader::DFText => todo!()
     };
+
+    Ok(meta)
+}
+
+#[cfg(not(feature = "tokio"))]
+pub fn read_df_header_and_meta<T: for<'a> Deserialize<'a>> (
+    stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<(DFBinaryHeader, T), DFParseError> {
+
+    let header = read_binary_header(stream)?;
+
+    let mut meta_bytes = vec![0u8; header.get_meta_len()];
+    stream.read_exact(&mut meta_bytes[..])?;
+    
+    let meta = parse_meta(&header, meta_bytes)?;
 
     Ok((header, meta))
 }
 
-pub async fn read_df_message<T: for<'a> Deserialize<'a>> (
-    stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> tokio::io::Result<DFMessage<T>> {
+#[cfg(feature = "tokio")]
+pub async fn read_df_header_and_meta<T: for<'a> Deserialize<'a>> (
+    stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> Result<(DFBinaryHeader, T), DFParseError> {
+        let header = read_binary_header(stream).await?;
 
-    let (header, meta) = read_df_header_and_meta(stream).await?;
+        let mut meta_bytes = vec![0u8; header.get_meta_len()];
+        stream.read_exact(&mut meta_bytes[..]).await?;
+        
+        let meta = parse_meta(&header, meta_bytes)?;
+
+        Ok((header, meta))
+}
+
+#[cfg(not(feature = "tokio"))]
+pub fn read_df_message<T: for<'a> Deserialize<'a>> (
+    stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<DFMessage<T>, DFParseError> {
+
+    let (header, meta) = read_df_header_and_meta(stream)?;
     
-    let data = match header {
-        DFBinaryHeader::DF01 { data_len, .. } => {
-            if data_len != 0 {
-                let mut data_bytes = vec![0u8; data_len as usize];
-                stream.read_exact(&mut data_bytes[..]).await?;
-                Some(data_bytes)
-            } else {
-                None
-            }
-        },
-        DFBinaryHeader::DFText => todo!()
-    };
+    let data = if header.get_data_len() != 0 {
+        let mut data_bytes = vec![0u8; header.get_data_len()];
+        stream.read_exact(&mut data_bytes[..])?;
+        Some(data_bytes)
+    } else { None };
 
     Ok(DFMessage { meta, data })
+}
+
+#[cfg(feature = "tokio")]
+pub async fn read_df_message<T: for<'a> Deserialize<'a>> (
+    stream: & mut (impl AsyncReadExt + std::marker::Unpin)) -> Result<DFMessage<T>, DFParseError> {
+
+        let (header, meta) = read_df_header_and_meta(stream).await?;
+    
+        let data = if header.get_data_len() != 0 {
+            let mut data_bytes = vec![0u8; header.get_data_len()];
+            stream.read_exact(&mut data_bytes[..]).await?;
+            Some(data_bytes)
+        } else { None };
+    
+        Ok(DFMessage { meta, data })
 }
