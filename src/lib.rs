@@ -14,8 +14,6 @@ const DF02_OPEN_SCOPE: &[u8; 2] = b"#~";
 
 const DF01_METADATA_ENDING: &[u8; 2] = b"\r\n";
 
-
-
 #[derive(Debug)]
 pub enum MetaType {
     Undefined = 0x00000000,
@@ -208,8 +206,7 @@ fn make_message<T: Serialize>(meta: T, data: &Option<Vec<u8>>) -> Result<Vec<u8>
 }
 
 
-#[cfg(not(feature = "tokio"))]
-pub fn read_binary_header(stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<DFBinaryHeader, DFParseError> {
+pub fn read_binary_header_sync(stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<DFBinaryHeader, DFParseError> {
 
     let mut header_bytes = [0u8; 30];
 
@@ -234,8 +231,7 @@ pub async fn read_binary_header(stream: & mut (impl AsyncReadExt + std::marker::
     parse_header(&header_bytes)
 }
 
-#[cfg(not(feature = "tokio"))]
-pub fn write_df_message<T: Serialize>(
+pub fn write_df_message_sync<T: Serialize>(
     stream: & mut (impl std::io::Write + std::marker::Unpin), 
     meta: T, data: Option<Vec<u8>>) -> Result<(), DFParseError> {
 
@@ -277,11 +273,10 @@ pub fn parse_meta<T: for<'a> Deserialize<'a>> (
     Ok(meta)
 }
 
-#[cfg(not(feature = "tokio"))]
-pub fn read_df_header_and_meta<T: for<'a> Deserialize<'a>> (
+pub fn read_df_header_and_meta_sync<T: for<'a> Deserialize<'a>> (
     stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<(DFBinaryHeader, T), DFParseError> {
 
-    let header = read_binary_header(stream)?;
+    let header = read_binary_header_sync(stream)?;
 
     let mut meta_bytes = vec![0u8; header.get_meta_len()];
     stream.read_exact(&mut meta_bytes[..])?;
@@ -304,11 +299,10 @@ pub async fn read_df_header_and_meta<T: for<'a> Deserialize<'a>> (
         Ok((header, meta))
 }
 
-#[cfg(not(feature = "tokio"))]
-pub fn read_df_message<T: for<'a> Deserialize<'a>> (
+pub fn read_df_message_sync<T: for<'a> Deserialize<'a>> (
     stream: & mut (impl std::io::Read + std::marker::Unpin)) -> Result<DFMessage<T>, DFParseError> {
 
-    let (header, meta) = read_df_header_and_meta(stream)?;
+    let (header, meta) = read_df_header_and_meta_sync(stream)?;
     
     let data = if header.get_data_len() != 0 {
         let mut data_bytes = vec![0u8; header.get_data_len()];

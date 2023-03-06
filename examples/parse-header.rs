@@ -1,12 +1,11 @@
-use dataforge::{read_binary_header, DFBinaryHeader};
-
 #[cfg(not(feature = "tokio"))]
 fn main() {
     use std::io::Read;
+    use dataforge::{read_binary_header_sync, DFBinaryHeader};
 
     let mut file = std::fs::File::open("./resources/test/df01-point.df").unwrap();
 
-    let header = read_binary_header(&mut file).unwrap();
+    let header = read_binary_header_sync(&mut file).unwrap();
 
     match header {
         DFBinaryHeader::DF01 { meta_len, .. } => {
@@ -24,6 +23,7 @@ fn main() {
 async fn main() {
 
     use tokio::io::AsyncReadExt;
+    use dataforge::{read_binary_header, DFBinaryHeader};
 
     let mut file = tokio::fs::File::open("./resources/test/df01-point.df").await.unwrap();
 

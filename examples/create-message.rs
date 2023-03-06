@@ -1,8 +1,7 @@
-use dataforge::write_df_message;
-
-
 #[cfg(not(feature = "tokio"))]
 fn main() {
+
+    use dataforge::write_df_message_sync;
 
     let data = r#"
         {
@@ -13,7 +12,7 @@ fn main() {
         let meta: serde_json::Value = serde_json::from_str(data).unwrap();
 
         let mut stream = vec![];
-        write_df_message(&mut stream, meta, None).unwrap();
+        write_df_message_sync(&mut stream, meta, None).unwrap();
 
         println!("{:?}", String::from_utf8_lossy(&stream))
 }
@@ -21,6 +20,8 @@ fn main() {
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() {
+
+    use dataforge::write_df_message;
 
     let data = r#"
         {
