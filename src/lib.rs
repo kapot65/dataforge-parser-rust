@@ -201,6 +201,8 @@ fn make_message<T: Serialize>(meta: T, data: &Option<Vec<u8>>) -> Result<Vec<u8>
         byteorder::WriteBytesExt::write_u32::<BigEndian>(&mut buffer, 0)?;
     }
     std::io::Write::write_all(&mut buffer, DF01_CLOSE_SCOPE)?;
+    
+    std::io::Write::write_all(&mut buffer, &meta_vec)?;
 
     Ok(buffer)
 }
