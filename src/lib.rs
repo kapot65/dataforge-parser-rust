@@ -75,7 +75,7 @@ impl TryFrom<u32> for MetaType {
             code if code == MetaType::Qdatastream as u32 => Ok(MetaType::Qdatastream),
             code => Err(DFParseError::MalformedHeader(
                 format!("No meta type for 0x{code:x} code!")
-            )), // TODO: remove panic
+            ))
         }
     }
 }
