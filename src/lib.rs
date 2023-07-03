@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use arrayref::array_ref;
 use  byteorder::BigEndian;
 #[cfg(feature = "tokio")] 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -126,24 +127,22 @@ fn header_size(scope: &[u8; 2]) -> Result<usize, DFParseError> {
 fn parse_header(header_bytes: &[u8; 30]) -> Result<DFBinaryHeader, DFParseError> {
     
     if &header_bytes[0..2] == DF01_OPEN_SCOPE {
-        
-        let header_type = u32::from_be_bytes(header_bytes[2..6].try_into().unwrap());
+        let header_type = u32::from_be_bytes(*array_ref![header_bytes, 2, 4]);
         if header_type != 0x14000 {
             Err(DFParseError::MalformedHeader("header_type != 0x14000".to_string()))?
         }
 
-        let time = u32::from_be_bytes(header_bytes[6..10].try_into().unwrap());
+        let time = u32::from_be_bytes(*array_ref![header_bytes, 6, 4]);
 
         let meta_type = MetaType::try_from(
-            u32::from_be_bytes(header_bytes[10..14].try_into().unwrap())
+            u32::from_be_bytes(*array_ref![header_bytes, 10, 4])
         )?;
-        let meta_len = u32::from_be_bytes(header_bytes[14..18].try_into().unwrap()) as usize;
+        let meta_len = u32::from_be_bytes(*array_ref![header_bytes, 14, 4]) as usize;
 
-        let data_type = u32::from_be_bytes(header_bytes[18..22].try_into().unwrap());
-        let data_len = u32::from_be_bytes(header_bytes[22..26].try_into().unwrap()) as  usize;
+        let data_type = u32::from_be_bytes(*array_ref![header_bytes, 18, 4]);
+        let data_len = u32::from_be_bytes(*array_ref![header_bytes, 22, 4]) as  usize;
 
         if &header_bytes[26..30] != DF01_CLOSE_SCOPE {
-            println!("{:?}", &header_bytes[26..30]);
             Err(DFParseError::MalformedHeader(
                 format!(
                     "open scope '{}' does not match closing '{}'",
@@ -213,7 +212,7 @@ pub fn read_binary_header_sync(stream: & mut (impl std::io::Read + std::marker::
     let mut header_bytes = [0u8; 30];
 
     stream.read_exact(&mut header_bytes[0..2])?;
-    let header_size = header_size(&header_bytes[0..2].try_into().unwrap())?;
+    let header_size = header_size(array_ref![header_bytes, 0, 2])?;
 
     stream.read_exact(&mut header_bytes[2..header_size])?;
 
@@ -226,7 +225,7 @@ pub async fn read_binary_header(stream: & mut (impl AsyncReadExt + std::marker::
     let mut header_bytes = [0u8; 30];
 
     stream.read_exact(&mut header_bytes[0..2]).await?;
-    let header_size = header_size(&header_bytes[0..2].try_into().unwrap())?;
+    let header_size = header_size(array_ref![header_bytes, 0, 2])?;
 
     stream.read_exact(&mut header_bytes[2..header_size]).await?;
 
