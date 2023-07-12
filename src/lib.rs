@@ -27,8 +27,8 @@ pub enum DFParseError {
     NotADFMessage(String),
     MalformedHeader(String),
     Unimplemented(String),
-    MetaError(Box<dyn Error + std::marker::Send>),
-    IoError(std::io::Error)
+    MetaError(Box<dyn Error + std::marker::Sync + std::marker::Send>),
+    IoError(Box<dyn Error + std::marker::Sync + std::marker::Send>)
 }
 
 impl std::fmt::Display for DFParseError {
@@ -57,7 +57,7 @@ impl Error for DFParseError {
 
 impl From<std::io::Error> for DFParseError {
     fn from(err: std::io::Error) -> Self {
-        DFParseError::IoError(err)
+        DFParseError::IoError(Box::new(err))
     }
 }
 
